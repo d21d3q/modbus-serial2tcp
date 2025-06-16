@@ -1,0 +1,28 @@
+[Unit]
+Description=Modbus Serial to TCP Gateway
+Documentation=https://github.com/d21d3q/modbus-serial2tcp
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+ExecStart=/usr/local/bin/modbus-s2t --port /dev/ttyUSB0 --speed 9600 --tcp-server 0.0.0.0:502 --slaveid 1
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/dev
+
+# Device access for serial ports
+SupplementaryGroups=dialout
+
+[Install]
+WantedBy=multi-user.target

@@ -24,7 +24,7 @@ var (
 	timeout      int
 	logLevel     int
 	tcpServer    string
-	unitID       int
+	slaveID      int
 )
 
 // validateParity validates that the parity value is one of the allowed values
@@ -54,9 +54,9 @@ func validateTCPServer(tcpServer string) error {
 	ip := parts[0]
 	portStr := parts[1]
 
-	// Validate IP address
-	if net.ParseIP(ip) == nil {
-		return fmt.Errorf("invalid IP address '%s' in TCP server '%s'", ip, tcpServer)
+	// Validate IP address or hostname
+	if net.ParseIP(ip) == nil && ip != "localhost" {
+		return fmt.Errorf("invalid IP address or hostname '%s' in TCP server '%s'", ip, tcpServer)
 	}
 
 	// Validate port
@@ -74,8 +74,9 @@ func validateTCPServer(tcpServer string) error {
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "modbus-serial2tcp",
-	Short: "A Modbus Serial to TCP gateway",
+	Use:     "modbus-serial2tcp",
+	Version: "0.2.0",
+	Short:   "A Modbus Serial to TCP gateway",
 	Long: `A Modbus Serial to TCP gateway that allows converting Modbus RTU (serial) 
 communication to Modbus TCP for integration with modern systems.`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
@@ -105,18 +106,11 @@ communication to Modbus TCP for integration with modern systems.`,
 			os.Exit(1)
 		}
 
-		// Validate Unit ID
-		if unitID < 1 || unitID > 247 {
-			fmt.Printf("Error: Unit ID must be between 1 and 247, got %d\n", unitID)
+		// Validate Slave ID
+		if slaveID < 1 || slaveID > 247 {
+			fmt.Printf("Error: Slave ID must be between 1 and 247, got %d\n", slaveID)
 			os.Exit(1)
 		}
-
-		fmt.Printf("Modbus Serial to TCP Gateway\n")
-		fmt.Printf("Serial Port: %s\n", serialPort)
-		fmt.Printf("Speed: %d\n", serialSpeed)
-		fmt.Printf("Parity: %s\n", serialParity)
-		fmt.Printf("Timeout: %d\n", timeout)
-		fmt.Printf("Unit ID: %d\n", unitID)
 
 		// TODO: Implement the actual gateway logic here
 		fmt.Println("Gateway would start here...")
@@ -133,7 +127,7 @@ communication to Modbus TCP for integration with modern systems.`,
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 		// Start the handler in a goroutine
-		go handler(mode, serialPort, tcpServer, unitID)
+		go handler(mode, serialPort, tcpServer, slaveID, timeout)
 
 		// Wait for signal
 		sig := <-sigChan
@@ -147,13 +141,16 @@ func init() {
 	// Define persistent flags for serial port settings
 	rootCmd.PersistentFlags().StringVarP(&serialPort, "port", "p", "/dev/ttyUSB0", "Serial port path (e.g., /dev/ttyUSB0, COM1)")
 	rootCmd.PersistentFlags().IntVarP(&serialSpeed, "speed", "s", 9600, "Serial port speed/baud rate")
-	rootCmd.PersistentFlags().StringVar(&serialParity, "parity", "N", "Serial port parity (N for none, E for even, O for odd)")
+	rootCmd.PersistentFlags().StringVarP(&serialParity, "parity", "P", "N", "Serial port parity (N for none, E for even, O for odd)")
 	rootCmd.PersistentFlags().IntVarP(&timeout, "timeout", "t", 1, "Timeout in seconds")
 	rootCmd.PersistentFlags().StringVarP(&tcpServer, "tcp-server", "S", "", "TCP server address (e.g. 0.0.0.0:502)")
-	rootCmd.PersistentFlags().IntVarP(&unitID, "unitid", "u", 1, "Modbus Unit ID to filter frames (1-247)")
+	rootCmd.PersistentFlags().IntVarP(&slaveID, "slaveid", "i", 1, "Modbus Slave ID to filter frames (1-247)")
 
 	// Mark the port flag as required
 	rootCmd.MarkPersistentFlagRequired("port")
+	rootCmd.MarkPersistentFlagRequired("speed")
+	rootCmd.MarkPersistentFlagRequired("tcp-server")
+	rootCmd.MarkPersistentFlagRequired("slaveid")
 }
 
 func main() {
@@ -163,10 +160,10 @@ func main() {
 	}
 }
 
-// parseFrame attempts to parse the accumulated frame buffer and check unit ID
-func parseFrame(frameBuffer []byte, expectedUnitID int) {
+// parseFrame attempts to parse the accumulated frame buffer and check slave ID
+func parseFrame(frameBuffer []byte, expectedSlaveID int) (*mbserver.RTUFrame, error) {
 	if len(frameBuffer) == 0 {
-		return
+		return nil, fmt.Errorf("empty frame buffer")
 	}
 
 	log.Debugf("Attempting to parse %d bytes: %x", len(frameBuffer), frameBuffer)
@@ -175,23 +172,66 @@ func parseFrame(frameBuffer []byte, expectedUnitID int) {
 	if parseErr != nil {
 		log.Printf("bad serial frame error %v\n", parseErr)
 		log.Printf("Keep the RTU server running!!\n")
-		return
+		return nil, parseErr
 	}
 
-	// Check if the frame is for our unit ID
-	frameUnitID := int(frame.Address)
-	if frameUnitID != expectedUnitID {
-		log.Debugf("Frame unit ID %d does not match expected unit ID %d, ignoring frame", frameUnitID, expectedUnitID)
-		return
+	// Check if the frame is for our slave ID
+	frameSlaveID := int(frame.Address)
+	if frameSlaveID != expectedSlaveID {
+		log.Debugf("Frame slave ID %d does not match expected slave ID %d, ignoring frame", frameSlaveID, expectedSlaveID)
+		return nil, fmt.Errorf("frame slave ID %d does not match expected slave ID %d", frameSlaveID, expectedSlaveID)
 	}
 
-	log.Debugf("Frame unit ID %d matches expected unit ID, processing frame", frameUnitID)
-	log.Debugf("Successfully parsed RTU frame with %d bytes for unit ID %d", len(frameBuffer), frameUnitID)
-	_ = frame // Use the frame for further processing
-	// request := &mbserver.Request{port, frame}
+	log.Debugf("Frame slave ID %d matches expected slave ID, processing frame", frameSlaveID)
+	log.Debugf("Successfully parsed RTU frame with %d bytes for slave ID %d", len(frameBuffer), frameSlaveID)
+	return frame, nil
 }
 
-func handler(mode *serial.Mode, serialPort string, tcpServer string, unitID int) {
+// makeTCPRequest sends a Modbus RTU frame to a TCP server and returns the response
+func makeTCPRequest(tcpServer string, frame *mbserver.RTUFrame, timeoutSeconds int) (*mbserver.RTUFrame, *mbserver.Exception) {
+	log.Debugf("Connecting to TCP server: %s", tcpServer)
+
+	// Connect to TCP server
+	timeoutDuration := time.Duration(timeoutSeconds) * time.Second
+	conn, err := net.DialTimeout("tcp", tcpServer, timeoutDuration)
+	if err != nil {
+		return nil, &mbserver.GatewayPathUnavailable
+	}
+	defer conn.Close()
+
+	// create the TCP transport
+	transport := newTCPTransport(conn, timeoutDuration)
+	defer transport.Close()
+
+	// Convert RTU frame to PDU for TCP transport
+	pdu := &pdu{
+		unitId:       frame.Address,
+		functionCode: frame.Function,
+		payload:      frame.Data,
+	}
+
+	log.Debugf("Sending Modbus request: Unit=%d, Function=%d, Data=%x", pdu.unitId, pdu.functionCode, pdu.payload)
+
+	// Execute request through TCP transport
+	response, err := transport.ExecuteRequest(pdu)
+	if err != nil {
+		return nil, &mbserver.GatewayTargetDeviceFailedtoRespond
+	}
+
+	log.Debugf("Received Modbus response: Unit=%d, Function=%d, Data=%x", response.unitId, response.functionCode, response.payload)
+
+	// For now, let's return the parsed frame as-is since we need a CRC function
+	// TODO: Calculate and append CRC for RTU frame
+	responseFrame := &mbserver.RTUFrame{
+		Address:  response.unitId,
+		Function: response.functionCode,
+		Data:     response.payload,
+	}
+
+	return responseFrame, &mbserver.Success
+}
+
+func handler(mode *serial.Mode, serialPort string, tcpServer string, slaveID int, timeoutSeconds int) {
 	var ser serial.Port = nil
 	var err error
 
@@ -207,7 +247,7 @@ func handler(mode *serial.Mode, serialPort string, tcpServer string, unitID int)
 		bitsPerChar = 11 // 8E1 or 8O1
 	}
 	charTime := time.Duration(float64(bitsPerChar) / float64(mode.BaudRate) * float64(time.Second))
-	frameTimeout := charTime * 4 // 4 times character time
+	frameTimeout := charTime * 8 // 4 // 4 times character time
 
 	log.Infof("Character time: %v, Frame timeout: %v", charTime, frameTimeout)
 
@@ -241,7 +281,26 @@ func handler(mode *serial.Mode, serialPort string, tcpServer string, unitID int)
 			// Frame timeout occurred - parse accumulated data
 			if len(frameBuffer) > 0 {
 				log.Debugf("Frame timer expired, attempting to parse %d bytes: %x", len(frameBuffer), frameBuffer)
-				parseFrame(frameBuffer, unitID)
+				frame, err := parseFrame(frameBuffer, slaveID)
+				if err == nil && frame != nil {
+					// Send frame to TCP server
+					tcpRet, exc := makeTCPRequest(tcpServer, frame, timeoutSeconds)
+					log.Debug("TCP response:", tcpRet, "Exception:", exc)
+					if exc != &mbserver.Success {
+						log.Errorf("Failed to send frame to TCP server: %v", err)
+						frame.SetException(exc)
+						ser.Write(frame.Bytes())
+						continue
+					}
+					// write to serial port
+					ret := tcpRet.Bytes()
+					n, err := ser.Write(ret)
+					if err != nil {
+						log.Errorf("Failed to write frame to serial port: %v", err)
+					} else {
+						log.Debugf("Wrote %d bytes to serial port: %x", n, ret)
+					}
+				}
 				frameBuffer = nil
 			}
 
