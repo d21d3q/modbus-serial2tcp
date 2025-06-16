@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+
+    - name: Download dependencies
+      run: go mod download
+
+    # - name: Run tests
+    #   run: go test -v ./...
+
+    - name: Create build directory
+      run: mkdir -p build
+
+    - name: Build for ARM Linux
+      run: |
+        GOARCH=arm GOOS=linux go build -ldflags="-s -w" -o build/modbus-serial2tcp-arm-linux .
+        chmod +x build/modbus-serial2tcp-arm-linux
+
+    - name: Build for ARM64 Linux
+      run: |
+        GOARCH=arm64 GOOS=linux go build -ldflags="-s -w" -o build/modbus-serial2tcp-arm64-linux .
+        chmod +x build/modbus-serial2tcp-arm64-linux
+
+    - name: Build for AMD64 Linux
+      run: |
+        GOARCH=amd64 GOOS=linux go build -ldflags="-s -w" -o build/modbus-serial2tcp-amd64-linux .
+        chmod +x build/modbus-serial2tcp-amd64-linux
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          build/modbus-serial2tcp-arm-linux
+          build/modbus-serial2tcp-arm64-linux
+          build/modbus-serial2tcp-amd64-linux
+          modbus-s2t.service
